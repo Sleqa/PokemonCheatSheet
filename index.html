@@ -26,6 +26,10 @@
     .type-btn:hover { transform: translate(-2px, -2px); }
     .type-btn:active { transform: translate(1px, 1px); }
     .mode-btn { transition: all 0.15s ease; }
+    .slot-card { transition: all 0.2s ease; }
+    .slot-card:hover { transform: translate(-1px, -1px); }
+    .reco-card { transition: all 0.2s ease; }
+    .sub-tab { transition: all 0.15s ease; }
   </style>
 </head>
 <body>
@@ -112,9 +116,195 @@
       return buckets;
     }
 
-    const TypeBadge = ({ type, size = 'md' }) => {
+    function attackingTypeScore(attacker, team) {
+      let score = 0;
+      team.forEach((member) => {
+        if (!member) return;
+        const m = calcMultiplier(attacker, member.type1, member.type2);
+        if (m === 4) score += 4;
+        else if (m === 2) score += 2;
+        else if (m === 1) score += 0;
+        else if (m === 0.5) score -= 1;
+        else if (m === 0.25) score -= 2;
+        else if (m === 0) score -= 3;
+      });
+      return score;
+    }
+
+    function teamThreatScore(team) {
+      let total = 0;
+      TYPES.forEach((atk) => {
+        const s = attackingTypeScore(atk, team);
+        if (s > 0) total += s;
+      });
+      return total;
+    }
+
+    function analyseTeam(team) {
+      const valid = team.filter(m => m && m.type1);
+      const result = {};
+      TYPES.forEach((atkType) => {
+        let weak = 0, quadWeak = 0, neutral = 0, resist = 0, doubleResist = 0, immune = 0;
+        valid.forEach((member) => {
+          const m = calcMultiplier(atkType, member.type1, member.type2);
+          if (m === 0) immune++;
+          else if (m === 0.25) doubleResist++;
+          else if (m === 0.5) resist++;
+          else if (m === 1) neutral++;
+          else if (m === 2) weak++;
+          else if (m === 4) quadWeak++;
+        });
+        const score = (quadWeak * 4) + (weak * 2) + (neutral * 0) - (resist * 1) - (doubleResist * 2) - (immune * 3);
+        result[atkType] = { weak, quadWeak, neutral, resist, doubleResist, immune, score, total: valid.length };
+      });
+      return result;
+    }
+
+    function generateAllCombos() {
+      const combos = [];
+      TYPES.forEach(t => combos.push({ type1: t, type2: null }));
+      for (let i = 0; i < TYPES.length; i++) {
+        for (let j = i + 1; j < TYPES.length; j++) {
+          combos.push({ type1: TYPES[i], type2: TYPES[j] });
+        }
+      }
+      return combos;
+    }
+
+    const ALL_COMBOS = generateAllCombos();
+
+    function recommendAdditions(team, topN = 5) {
+      const baseline = teamThreatScore(team);
+      const results = ALL_COMBOS.map((combo) => {
+        const newTeam = [...team];
+        const emptyIdx = newTeam.findIndex(s => s === null);
+        if (emptyIdx === -1) {
+          newTeam.push(combo);
+        } else {
+          newTeam[emptyIdx] = combo;
+        }
+        const newScore = teamThreatScore(newTeam);
+        return {
+          combo,
+          newScore,
+          improvement: baseline - newScore,
+        };
+      });
+      results.sort((a, b) => b.improvement - a.improvement);
+      return { baseline, results: results.slice(0, topN) };
+    }
+
+    function recommendSwaps(team) {
+      const baseline = teamThreatScore(team);
+      const swaps = [];
+      team.forEach((member, idx) => {
+        if (!member) return;
+        let bestImprovement = -Infinity;
+        let bestCombo = null;
+        let bestScore = baseline;
+        ALL_COMBOS.forEach((combo) => {
+          if (combo.type1 === member.type1 && combo.type2 === member.type2) return;
+          if (combo.type1 === member.type2 && combo.type2 === member.type1) return;
+          const newTeam = [...team];
+          newTeam[idx] = combo;
+          const newScore = teamThreatScore(newTeam);
+          const improvement = baseline - newScore;
+          if (improvement > bestImprovement) {
+            bestImprovement = improvement;
+            bestCombo = combo;
+            bestScore = newScore;
+          }
+        });
+        swaps.push({
+          slotIdx: idx,
+          original: member,
+          bestReplacement: bestCombo,
+          improvement: bestImprovement,
+          newScore: bestScore,
+        });
+      });
+      swaps.sort((a, b) => b.improvement - a.improvement);
+      return { baseline, swaps };
+    }
+
+    // For each team member, calculate matchup vs an opponent with given typing and moves
+    // Returns array of { slotIdx, member, defenseScore, offenseScore, totalScore, breakdown }
+    //
+    // defenseScore: higher = takes less damage from opponent's moves
+    //   For each move type, calc multiplier vs my member -> (1 - m) per move
+    //   So immune (0×) = +1.0, resist (0.5×) = +0.5, neutral = 0, weak (2×) = -1, quad weak (4×) = -3
+    //
+    // offenseScore: higher = my STAB hits opponent harder
+    //   For each of my types, calc multiplier vs opponent typing
+    //   Take the BEST of the two (since you'd lead with the stronger one)
+    //   2× = +1, 1× = 0, 0.5× = -0.5, 0× = -2 (basically useless)
+    function evaluateMatchup(member, opponentTyping, moveTypes) {
+      // Defense: vs opponent's moves
+      let defenseScore = 0;
+      const moveBreakdown = [];
+      moveTypes.forEach((moveType) => {
+        if (!moveType) return;
+        const m = calcMultiplier(moveType, member.type1, member.type2);
+        let pts;
+        if (m === 0) pts = 3;
+        else if (m === 0.25) pts = 2;
+        else if (m === 0.5) pts = 1;
+        else if (m === 1) pts = 0;
+        else if (m === 2) pts = -2;
+        else if (m === 4) pts = -4;
+        else pts = 0;
+        defenseScore += pts;
+        moveBreakdown.push({ moveType, multiplier: m, pts });
+      });
+
+      // Offense: my STAB types vs opponent typing
+      let offenseScore = 0;
+      let bestOffenseType = member.type1;
+      let bestOffenseMult = calcMultiplier(member.type1, opponentTyping.type1, opponentTyping.type2);
+      const offenseBreakdown = [{
+        attackType: member.type1,
+        multiplier: bestOffenseMult,
+      }];
+      if (member.type2) {
+        const m2 = calcMultiplier(member.type2, opponentTyping.type1, opponentTyping.type2);
+        offenseBreakdown.push({ attackType: member.type2, multiplier: m2 });
+        if (m2 > bestOffenseMult) {
+          bestOffenseMult = m2;
+          bestOffenseType = member.type2;
+        }
+      }
+      // score the BEST offensive option
+      if (bestOffenseMult === 4) offenseScore = 3;
+      else if (bestOffenseMult === 2) offenseScore = 2;
+      else if (bestOffenseMult === 1) offenseScore = 0;
+      else if (bestOffenseMult === 0.5) offenseScore = -1;
+      else if (bestOffenseMult === 0.25) offenseScore = -2;
+      else if (bestOffenseMult === 0) offenseScore = -4;
+
+      return {
+        defenseScore,
+        offenseScore,
+        totalScore: defenseScore + offenseScore,
+        moveBreakdown,
+        offenseBreakdown,
+        bestOffenseType,
+        bestOffenseMult,
+      };
+    }
+
+    function rankCounters(team, opponentTyping, moveTypes) {
+      const validMoves = moveTypes.filter(Boolean);
+      if (!opponentTyping || !opponentTyping.type1 || validMoves.length === 0) return [];
+      return team
+        .map((member, idx) => member ? { slotIdx: idx, member, ...evaluateMatchup(member, opponentTyping, moveTypes) } : null)
+        .filter(Boolean)
+        .sort((a, b) => b.totalScore - a.totalScore);
+    }
+
+    const TypeBadge = ({ type, size = 'md', dim }) => {
       const c = TYPE_COLORS[type];
       const sizes = {
+        xs: { padding: '3px 8px', fontSize: '8px' },
         sm: { padding: '4px 10px', fontSize: '10px' },
         md: { padding: '6px 14px', fontSize: '12px' },
         lg: { padding: '10px 18px', fontSize: '15px' },
@@ -132,6 +322,7 @@
             textTransform: 'uppercase',
             borderRadius: '2px',
             boxShadow: `0 0 0 2px ${c.text}, 3px 3px 0 0 ${c.text}`,
+            opacity: dim ? 0.5 : 1,
             ...sizes[size],
           }}
         >
@@ -139,6 +330,18 @@
         </span>
       );
     };
+
+    const ComboBadges = ({ combo, size = 'xs' }) => (
+      <div style={{ display: 'inline-flex', gap: '4px', alignItems: 'center', flexWrap: 'wrap' }}>
+        <TypeBadge type={combo.type1} size={size} />
+        {combo.type2 && (
+          <>
+            <span style={{ color: '#888', fontFamily: '"Press Start 2P", monospace', fontSize: '9px' }}>/</span>
+            <TypeBadge type={combo.type2} size={size} />
+          </>
+        )}
+      </div>
+    );
 
     const Section = ({ title, types, accent, sublabel }) => (
       <div style={{ marginBottom: '18px' }}>
@@ -184,12 +387,33 @@
       const [type1, setType1] = useState('Fire');
       const [type2, setType2] = useState(null);
 
+      const [team, setTeam] = useState([null, null, null, null, null, null]);
+      const [editingSlot, setEditingSlot] = useState(0);
+      const [showRecos, setShowRecos] = useState(false);
+
+      // Team mode sub-tab: 'analysis' | 'counter'
+      const [teamSubMode, setTeamSubMode] = useState('analysis');
+
+      // Opponent counter state
+      // editingTarget: { kind: 'opponentType' | 'opponentType2' | 'move', moveIdx?: number } | null
+      const [opponentTyping, setOpponentTyping] = useState({ type1: null, type2: null });
+      const [opponentMoves, setOpponentMoves] = useState([null, null, null, null]);
+      const [editingTarget, setEditingTarget] = useState({ kind: 'opponentType' });
+
       const c = TYPE_COLORS[type1];
 
       const handleTypeClick = (t) => {
         if (mode === 'offensive') {
           setType1(t);
           setType2(null);
+          return;
+        }
+        if (mode === 'team') {
+          if (teamSubMode === 'counter') {
+            handleCounterTypeClick(t);
+          } else {
+            handleTeamTypeClick(t);
+          }
           return;
         }
         if (t === type1) {
@@ -207,6 +431,105 @@
         }
       };
 
+      const handleTeamTypeClick = (t) => {
+        const slot = team[editingSlot];
+        const newTeam = [...team];
+        if (!slot) {
+          newTeam[editingSlot] = { type1: t, type2: null };
+        } else if (slot.type1 === t) {
+          if (slot.type2) {
+            newTeam[editingSlot] = { type1: slot.type2, type2: null };
+          } else {
+            newTeam[editingSlot] = null;
+          }
+        } else if (slot.type2 === t) {
+          newTeam[editingSlot] = { type1: slot.type1, type2: null };
+        } else {
+          newTeam[editingSlot] = { type1: slot.type1, type2: t };
+        }
+        setTeam(newTeam);
+      };
+
+      const handleCounterTypeClick = (t) => {
+        if (!editingTarget) return;
+        if (editingTarget.kind === 'opponentType') {
+          // primary opponent type
+          if (opponentTyping.type1 === t) {
+            // tap to clear
+            if (opponentTyping.type2) {
+              setOpponentTyping({ type1: opponentTyping.type2, type2: null });
+            } else {
+              setOpponentTyping({ type1: null, type2: null });
+            }
+          } else if (opponentTyping.type2 === t) {
+            setOpponentTyping({ ...opponentTyping, type2: null });
+          } else if (!opponentTyping.type1) {
+            setOpponentTyping({ type1: t, type2: null });
+          } else {
+            // already has primary, set/replace secondary
+            setOpponentTyping({ ...opponentTyping, type2: t });
+          }
+        } else if (editingTarget.kind === 'move') {
+          const newMoves = [...opponentMoves];
+          // tap selected to clear, otherwise set
+          if (newMoves[editingTarget.moveIdx] === t) {
+            newMoves[editingTarget.moveIdx] = null;
+          } else {
+            newMoves[editingTarget.moveIdx] = t;
+          }
+          setOpponentMoves(newMoves);
+          // auto-advance to next empty move slot
+          const nextEmpty = newMoves.findIndex((m, i) => i > editingTarget.moveIdx && !m);
+          if (nextEmpty !== -1) {
+            setEditingTarget({ kind: 'move', moveIdx: nextEmpty });
+          }
+        }
+      };
+
+      const clearSlot = (idx) => {
+        const newTeam = [...team];
+        newTeam[idx] = null;
+        setTeam(newTeam);
+      };
+
+      const clearTeam = () => {
+        setTeam([null, null, null, null, null, null]);
+        setEditingSlot(0);
+        setShowRecos(false);
+      };
+
+      const clearOpponent = () => {
+        setOpponentTyping({ type1: null, type2: null });
+        setOpponentMoves([null, null, null, null]);
+        setEditingTarget({ kind: 'opponentType' });
+      };
+
+      const teamAnalysis = useMemo(() => {
+        if (mode !== 'team' || teamSubMode !== 'analysis') return null;
+        return analyseTeam(team);
+      }, [mode, teamSubMode, team]);
+
+      const teamSize = team.filter(Boolean).length;
+
+      const sortedThreats = useMemo(() => {
+        if (!teamAnalysis) return [];
+        return TYPES
+          .map(t => ({ type: t, ...teamAnalysis[t] }))
+          .sort((a, b) => b.score - a.score);
+      }, [teamAnalysis]);
+
+      const recommendations = useMemo(() => {
+        if (mode !== 'team' || teamSubMode !== 'analysis' || !showRecos || teamSize === 0) return null;
+        const additions = recommendAdditions(team, 5);
+        const swaps = teamSize >= 2 ? recommendSwaps(team) : null;
+        return { additions, swaps };
+      }, [mode, teamSubMode, showRecos, team, teamSize]);
+
+      const counterRanking = useMemo(() => {
+        if (mode !== 'team' || teamSubMode !== 'counter') return null;
+        return rankCounters(team, opponentTyping, opponentMoves);
+      }, [mode, teamSubMode, team, opponentTyping, opponentMoves]);
+
       const defensiveBuckets = useMemo(
         () => (mode === 'defensive' ? groupByMultiplier(type1, type2) : null),
         [mode, type1, type2]
@@ -216,6 +539,21 @@
         () => (mode === 'offensive' ? offensiveFromType(type1) : null),
         [mode, type1]
       );
+
+      // For type grid highlighting in counter mode
+      const counterHighlight = useMemo(() => {
+        if (mode !== 'team' || teamSubMode !== 'counter') return null;
+        if (editingTarget?.kind === 'opponentType') {
+          return {
+            primary: opponentTyping.type1,
+            secondary: opponentTyping.type2,
+          };
+        }
+        if (editingTarget?.kind === 'move') {
+          return { primary: opponentMoves[editingTarget.moveIdx] };
+        }
+        return null;
+      }, [mode, teamSubMode, editingTarget, opponentTyping, opponentMoves]);
 
       return (
         <div
@@ -265,7 +603,7 @@
             <div
               style={{
                 display: 'flex',
-                gap: '10px',
+                gap: '8px',
                 justifyContent: 'center',
                 marginBottom: '24px',
                 flexWrap: 'wrap',
@@ -274,6 +612,7 @@
               {[
                 { id: 'defensive', label: '🛡 DEFENSIVE' },
                 { id: 'offensive', label: '⚔ OFFENSIVE' },
+                { id: 'team', label: '👥 TEAM' },
               ].map((m) => {
                 const active = mode === m.id;
                 return (
@@ -285,8 +624,8 @@
                       background: active ? c.bg : 'rgba(0,0,0,0.5)',
                       color: active ? c.text : '#aaa',
                       fontFamily: '"Press Start 2P", monospace',
-                      fontSize: '11px',
-                      padding: '12px 18px',
+                      fontSize: '10px',
+                      padding: '12px 16px',
                       border: 'none',
                       borderRadius: '2px',
                       cursor: 'pointer',
@@ -303,189 +642,361 @@
               })}
             </div>
 
-            <div
-              style={{
-                textAlign: 'center',
-                fontFamily: '"VT323", monospace',
-                fontSize: '20px',
-                color: '#bbb',
-                marginBottom: '16px',
-                padding: '0 10px',
-              }}
-            >
-              {mode === 'defensive'
-                ? type2
-                  ? 'Tap a third type to swap your secondary, or tap selected to deselect'
-                  : 'Tap one or two types to build a dual-type defender'
-                : 'Tap a type — see what its moves do offensively'}
-            </div>
-
-            <div
-              style={{
-                display: 'grid',
-                gridTemplateColumns: 'repeat(auto-fit, minmax(110px, 1fr))',
-                gap: '8px',
-                marginBottom: '32px',
-                padding: '18px',
-                background: 'rgba(0,0,0,0.4)',
-                border: '3px solid rgba(255,255,255,0.15)',
-                borderRadius: '4px',
-              }}
-            >
-              {TYPES.map((t) => {
-                const tc = TYPE_COLORS[t];
-                const isPrimary = type1 === t;
-                const isSecondary = mode === 'defensive' && type2 === t;
-                const isSelected = isPrimary || isSecondary;
-                return (
-                  <button
-                    key={t}
-                    className="type-btn"
-                    onClick={() => handleTypeClick(t)}
-                    style={{
-                      position: 'relative',
-                      background: tc.bg,
-                      color: tc.text,
-                      fontFamily: '"Press Start 2P", monospace',
-                      fontSize: '10px',
-                      padding: '12px 6px',
-                      border: 'none',
-                      borderRadius: '2px',
-                      cursor: 'pointer',
-                      letterSpacing: '0.5px',
-                      textTransform: 'uppercase',
-                      boxShadow: isSelected
-                        ? `0 0 0 3px #fff, 0 0 0 5px ${tc.text}, 0 0 22px ${tc.glow}`
-                        : `0 0 0 2px ${tc.text}, 4px 4px 0 0 ${tc.text}`,
-                      transform: isSelected ? 'translate(-1px, -1px)' : 'none',
-                    }}
-                  >
-                    {isPrimary && (
-                      <span
-                        style={{
-                          position: 'absolute',
-                          top: '2px',
-                          right: '4px',
-                          fontSize: '8px',
-                          color: tc.text,
-                          opacity: 0.7,
-                        }}
-                      >
-                        1
-                      </span>
-                    )}
-                    {isSecondary && (
-                      <span
-                        style={{
-                          position: 'absolute',
-                          top: '2px',
-                          right: '4px',
-                          fontSize: '8px',
-                          color: tc.text,
-                          opacity: 0.7,
-                        }}
-                      >
-                        2
-                      </span>
-                    )}
-                    {t}
-                  </button>
-                );
-              })}
-            </div>
-
-            <div
-              style={{
-                textAlign: 'center',
-                marginBottom: '28px',
-                padding: '20px',
-                background: `linear-gradient(135deg, ${c.bg}40 0%, ${c.bg}10 100%)`,
-                border: `3px solid ${c.bg}`,
-                borderRadius: '4px',
-              }}
-            >
-              <div
-                style={{
-                  fontFamily: '"VT323", monospace',
-                  fontSize: '20px',
-                  color: '#fff',
-                  opacity: 0.7,
-                  marginBottom: '12px',
-                  letterSpacing: '2px',
-                }}
-              >
-                {mode === 'defensive' ? 'DEFENDING TYPE' : 'ATTACKING TYPE'}
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
-                <TypeBadge type={type1} size="lg" />
-                {mode === 'defensive' && type2 && (
-                  <>
-                    <span style={{ fontFamily: '"Press Start 2P", monospace', color: '#fff', fontSize: '14px' }}>/</span>
-                    <TypeBadge type={type2} size="lg" />
-                  </>
-                )}
-              </div>
-              {mode === 'defensive' && type2 && (
-                <button
-                  onClick={() => setType2(null)}
-                  style={{
-                    marginTop: '14px',
-                    background: 'transparent',
-                    color: '#aaa',
-                    border: '2px solid #555',
-                    borderRadius: '2px',
-                    padding: '6px 12px',
-                    fontFamily: '"Press Start 2P", monospace',
-                    fontSize: '9px',
-                    cursor: 'pointer',
-                    letterSpacing: '1px',
-                  }}
-                >
-                  ✕ CLEAR SECONDARY
-                </button>
-              )}
-            </div>
-
-            {mode === 'defensive' ? (
-              <div
-                style={{
-                  background: 'rgba(0,0,0,0.55)',
-                  border: `3px solid ${c.bg}`,
-                  borderRadius: '4px',
-                  padding: '24px',
-                  position: 'relative',
-                  boxShadow: `6px 6px 0 0 rgba(0,0,0,0.5)`,
-                }}
-              >
+            {mode === 'team' && (
+              <>
+                {/* Sub-tabs */}
                 <div
                   style={{
-                    position: 'absolute',
-                    top: '-14px',
-                    left: '20px',
-                    background: c.bg,
-                    color: c.text,
-                    fontFamily: '"Press Start 2P", monospace',
-                    fontSize: '11px',
-                    padding: '6px 14px',
-                    letterSpacing: '1px',
-                    boxShadow: `0 0 0 2px ${c.text}`,
+                    display: 'flex',
+                    gap: '6px',
+                    justifyContent: 'center',
+                    marginBottom: '20px',
+                    flexWrap: 'wrap',
                   }}
                 >
-                  🛡 DAMAGE TAKEN
+                  {[
+                    { id: 'analysis', label: '📊 TEAM ANALYSIS' },
+                    { id: 'counter', label: '🎯 COUNTER OPPONENT' },
+                  ].map((sm) => {
+                    const active = teamSubMode === sm.id;
+                    return (
+                      <button
+                        key={sm.id}
+                        className="sub-tab"
+                        onClick={() => setTeamSubMode(sm.id)}
+                        style={{
+                          background: active ? `${c.bg}40` : 'transparent',
+                          color: active ? c.glow : '#888',
+                          fontFamily: '"Press Start 2P", monospace',
+                          fontSize: '9px',
+                          padding: '8px 14px',
+                          border: active ? `2px solid ${c.bg}` : '2px solid rgba(255,255,255,0.1)',
+                          borderRadius: '2px',
+                          cursor: 'pointer',
+                          letterSpacing: '1px',
+                        }}
+                      >
+                        {sm.label}
+                      </button>
+                    );
+                  })}
                 </div>
+
+                {/* Always show team slots in team mode */}
+                <div
+                  style={{
+                    textAlign: 'center',
+                    fontFamily: '"VT323", monospace',
+                    fontSize: '20px',
+                    color: '#bbb',
+                    marginBottom: '14px',
+                    padding: '0 10px',
+                  }}
+                >
+                  {teamSubMode === 'analysis'
+                    ? 'Tap a slot to edit, then tap types below'
+                    : 'Your team:'}
+                </div>
+
+                <div
+                  style={{
+                    display: 'grid',
+                    gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))',
+                    gap: '10px',
+                    marginBottom: '20px',
+                  }}
+                >
+                  {team.map((slot, idx) => {
+                    const isEditing = teamSubMode === 'analysis' && editingSlot === idx;
+                    const slotColor = slot ? TYPE_COLORS[slot.type1] : null;
+                    const clickable = teamSubMode === 'analysis';
+                    return (
+                      <div
+                        key={idx}
+                        className="slot-card"
+                        onClick={() => clickable && setEditingSlot(idx)}
+                        style={{
+                          background: slot
+                            ? `linear-gradient(135deg, ${slotColor.bg}50 0%, ${slotColor.bg}15 100%)`
+                            : 'rgba(0,0,0,0.4)',
+                          border: isEditing
+                            ? `3px solid ${c.glow}`
+                            : slot ? `3px solid ${slotColor.bg}` : '3px dashed rgba(255,255,255,0.2)',
+                          borderRadius: '4px',
+                          padding: '14px 12px',
+                          cursor: clickable ? 'pointer' : 'default',
+                          minHeight: '110px',
+                          display: 'flex',
+                          flexDirection: 'column',
+                          justifyContent: 'space-between',
+                          boxShadow: isEditing ? `0 0 20px ${c.glow}80` : 'none',
+                          position: 'relative',
+                        }}
+                      >
+                        <div
+                          style={{
+                            fontFamily: '"Press Start 2P", monospace',
+                            fontSize: '9px',
+                            color: isEditing ? c.glow : '#888',
+                            letterSpacing: '1px',
+                            marginBottom: '8px',
+                          }}
+                        >
+                          SLOT {idx + 1}{isEditing ? ' ◀' : ''}
+                        </div>
+                        {slot ? (
+                          <>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', alignItems: 'flex-start' }}>
+                              <TypeBadge type={slot.type1} size="xs" />
+                              {slot.type2 && <TypeBadge type={slot.type2} size="xs" />}
+                            </div>
+                            {teamSubMode === 'analysis' && (
+                              <button
+                                onClick={(e) => { e.stopPropagation(); clearSlot(idx); }}
+                                style={{
+                                  position: 'absolute',
+                                  top: '6px',
+                                  right: '6px',
+                                  background: 'rgba(0,0,0,0.5)',
+                                  color: '#fff',
+                                  border: '1px solid rgba(255,255,255,0.2)',
+                                  borderRadius: '2px',
+                                  width: '20px',
+                                  height: '20px',
+                                  fontSize: '10px',
+                                  cursor: 'pointer',
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'center',
+                                  padding: 0,
+                                }}
+                              >
+                                ✕
+                              </button>
+                            )}
+                          </>
+                        ) : (
+                          <div
+                            style={{
+                              fontFamily: '"VT323", monospace',
+                              fontSize: '18px',
+                              color: '#666',
+                              fontStyle: 'italic',
+                            }}
+                          >
+                            empty
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* Action buttons */}
+                {teamSubMode === 'analysis' && teamSize > 0 && (
+                  <div style={{ textAlign: 'center', marginBottom: '20px', display: 'flex', gap: '10px', justifyContent: 'center', flexWrap: 'wrap' }}>
+                    <button
+                      onClick={() => setShowRecos(!showRecos)}
+                      style={{
+                        background: showRecos ? c.bg : 'transparent',
+                        color: showRecos ? c.text : c.glow,
+                        border: `2px solid ${c.bg}`,
+                        borderRadius: '2px',
+                        padding: '10px 18px',
+                        fontFamily: '"Press Start 2P", monospace',
+                        fontSize: '10px',
+                        cursor: 'pointer',
+                        letterSpacing: '1px',
+                        boxShadow: showRecos ? `0 0 15px ${c.glow}80` : 'none',
+                      }}
+                    >
+                      {showRecos ? '✓ RECOMMENDATIONS ON' : '★ GET RECOMMENDATIONS'}
+                    </button>
+                    <button
+                      onClick={clearTeam}
+                      style={{
+                        background: 'transparent',
+                        color: '#aaa',
+                        border: '2px solid #555',
+                        borderRadius: '2px',
+                        padding: '10px 18px',
+                        fontFamily: '"Press Start 2P", monospace',
+                        fontSize: '10px',
+                        cursor: 'pointer',
+                        letterSpacing: '1px',
+                      }}
+                    >
+                      ✕ CLEAR TEAM
+                    </button>
+                  </div>
+                )}
+
+                {/* COUNTER MODE: opponent input UI */}
+                {teamSubMode === 'counter' && (
+                  <OpponentInput
+                    opponentTyping={opponentTyping}
+                    opponentMoves={opponentMoves}
+                    editingTarget={editingTarget}
+                    setEditingTarget={setEditingTarget}
+                    accentColor={c}
+                    clearOpponent={clearOpponent}
+                    teamSize={teamSize}
+                  />
+                )}
+              </>
+            )}
+
+            {mode !== 'team' && (
+              <div
+                style={{
+                  textAlign: 'center',
+                  fontFamily: '"VT323", monospace',
+                  fontSize: '20px',
+                  color: '#bbb',
+                  marginBottom: '16px',
+                  padding: '0 10px',
+                }}
+              >
+                {mode === 'defensive'
+                  ? type2
+                    ? 'Tap a third type to swap your secondary, or tap selected to deselect'
+                    : 'Tap one or two types to build a dual-type defender'
+                  : 'Tap a type — see what its moves do offensively'}
+              </div>
+            )}
+
+            {/* Type Selector — hidden in counter mode if no team */}
+            {!(mode === 'team' && teamSubMode === 'counter' && teamSize === 0) && (
+              <div
+                style={{
+                  display: 'grid',
+                  gridTemplateColumns: 'repeat(auto-fit, minmax(110px, 1fr))',
+                  gap: '8px',
+                  marginBottom: '32px',
+                  padding: '18px',
+                  background: 'rgba(0,0,0,0.4)',
+                  border: '3px solid rgba(255,255,255,0.15)',
+                  borderRadius: '4px',
+                }}
+              >
+                {TYPES.map((t) => {
+                  const tc = TYPE_COLORS[t];
+                  let isPrimary = false;
+                  let isSecondary = false;
+
+                  if (mode === 'team' && teamSubMode === 'counter') {
+                    isPrimary = counterHighlight?.primary === t;
+                    isSecondary = counterHighlight?.secondary === t;
+                  } else if (mode === 'team') {
+                    const slot = team[editingSlot];
+                    if (slot) {
+                      isPrimary = slot.type1 === t;
+                      isSecondary = slot.type2 === t;
+                    }
+                  } else if (mode === 'defensive') {
+                    isPrimary = type1 === t;
+                    isSecondary = type2 === t;
+                  } else {
+                    isPrimary = type1 === t;
+                  }
+
+                  const isSelected = isPrimary || isSecondary;
+                  return (
+                    <button
+                      key={t}
+                      className="type-btn"
+                      onClick={() => handleTypeClick(t)}
+                      style={{
+                        position: 'relative',
+                        background: tc.bg,
+                        color: tc.text,
+                        fontFamily: '"Press Start 2P", monospace',
+                        fontSize: '10px',
+                        padding: '12px 6px',
+                        border: 'none',
+                        borderRadius: '2px',
+                        cursor: 'pointer',
+                        letterSpacing: '0.5px',
+                        textTransform: 'uppercase',
+                        boxShadow: isSelected
+                          ? `0 0 0 3px #fff, 0 0 0 5px ${tc.text}, 0 0 22px ${tc.glow}`
+                          : `0 0 0 2px ${tc.text}, 4px 4px 0 0 ${tc.text}`,
+                        transform: isSelected ? 'translate(-1px, -1px)' : 'none',
+                      }}
+                    >
+                      {isPrimary && (
+                        <span style={{ position: 'absolute', top: '2px', right: '4px', fontSize: '8px', color: tc.text, opacity: 0.7 }}>1</span>
+                      )}
+                      {isSecondary && (
+                        <span style={{ position: 'absolute', top: '2px', right: '4px', fontSize: '8px', color: tc.text, opacity: 0.7 }}>2</span>
+                      )}
+                      {t}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+
+            {mode !== 'team' && (
+              <div
+                style={{
+                  textAlign: 'center',
+                  marginBottom: '28px',
+                  padding: '20px',
+                  background: `linear-gradient(135deg, ${c.bg}40 0%, ${c.bg}10 100%)`,
+                  border: `3px solid ${c.bg}`,
+                  borderRadius: '4px',
+                }}
+              >
                 <div
                   style={{
                     fontFamily: '"VT323", monospace',
-                    fontSize: '18px',
-                    color: '#bbb',
-                    marginTop: '12px',
-                    marginBottom: '20px',
-                    lineHeight: 1.3,
+                    fontSize: '20px',
+                    color: '#fff',
+                    opacity: 0.7,
+                    marginBottom: '12px',
+                    letterSpacing: '2px',
                   }}
                 >
+                  {mode === 'defensive' ? 'DEFENDING TYPE' : 'ATTACKING TYPE'}
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+                  <TypeBadge type={type1} size="lg" />
+                  {mode === 'defensive' && type2 && (
+                    <>
+                      <span style={{ fontFamily: '"Press Start 2P", monospace', color: '#fff', fontSize: '14px' }}>/</span>
+                      <TypeBadge type={type2} size="lg" />
+                    </>
+                  )}
+                </div>
+                {mode === 'defensive' && type2 && (
+                  <button
+                    onClick={() => setType2(null)}
+                    style={{
+                      marginTop: '14px',
+                      background: 'transparent',
+                      color: '#aaa',
+                      border: '2px solid #555',
+                      borderRadius: '2px',
+                      padding: '6px 12px',
+                      fontFamily: '"Press Start 2P", monospace',
+                      fontSize: '9px',
+                      cursor: 'pointer',
+                      letterSpacing: '1px',
+                    }}
+                  >
+                    ✕ CLEAR SECONDARY
+                  </button>
+                )}
+              </div>
+            )}
+
+            {mode === 'defensive' && (
+              <div style={panelStyle(c)}>
+                <PanelTag c={c} label="🛡 DAMAGE TAKEN" />
+                <div style={panelDescStyle()}>
                   When attacked, <strong style={{ color: c.glow }}>{type1}{type2 ? `/${type2}` : ''}</strong> takes:
                 </div>
-
                 <Section title="QUAD WEAK" sublabel="(4× damage)" types={defensiveBuckets[4]} accent="#FF3D3D" />
                 <Section title="WEAK" sublabel="(2× damage)" types={defensiveBuckets[2]} accent="#FF8F5D" />
                 <Section title="NEUTRAL" sublabel="(1× damage)" types={defensiveBuckets[1]} accent="#CCCCCC" />
@@ -493,51 +1004,46 @@
                 <Section title="DOUBLE RESIST" sublabel="(¼× damage)" types={defensiveBuckets[0.25]} accent="#5DFF8F" />
                 <Section title="IMMUNE" sublabel="(0× damage)" types={defensiveBuckets[0]} accent="#5DCFFF" />
               </div>
-            ) : (
-              <div
-                style={{
-                  background: 'rgba(0,0,0,0.55)',
-                  border: `3px solid ${c.bg}`,
-                  borderRadius: '4px',
-                  padding: '24px',
-                  position: 'relative',
-                  boxShadow: `6px 6px 0 0 rgba(0,0,0,0.5)`,
-                }}
-              >
-                <div
-                  style={{
-                    position: 'absolute',
-                    top: '-14px',
-                    left: '20px',
-                    background: c.bg,
-                    color: c.text,
-                    fontFamily: '"Press Start 2P", monospace',
-                    fontSize: '11px',
-                    padding: '6px 14px',
-                    letterSpacing: '1px',
-                    boxShadow: `0 0 0 2px ${c.text}`,
-                  }}
-                >
-                  ⚔ DAMAGE DEALT
-                </div>
-                <div
-                  style={{
-                    fontFamily: '"VT323", monospace',
-                    fontSize: '18px',
-                    color: '#bbb',
-                    marginTop: '12px',
-                    marginBottom: '20px',
-                    lineHeight: 1.3,
-                  }}
-                >
+            )}
+
+            {mode === 'offensive' && (
+              <div style={panelStyle(c)}>
+                <PanelTag c={c} label="⚔ DAMAGE DEALT" />
+                <div style={panelDescStyle()}>
                   When <strong style={{ color: c.glow }}>{type1}</strong> moves attack these types:
                 </div>
-
                 <Section title="SUPER EFFECTIVE" sublabel="(2× damage)" types={offensiveBuckets[2]} accent="#5DFF8F" />
                 <Section title="NEUTRAL" sublabel="(1× damage)" types={offensiveBuckets[1]} accent="#CCCCCC" />
                 <Section title="NOT VERY EFFECTIVE" sublabel="(½× damage)" types={offensiveBuckets[0.5]} accent="#FF8F5D" />
                 <Section title="NO EFFECT" sublabel="(0× damage)" types={offensiveBuckets[0]} accent="#FF5D5D" />
               </div>
+            )}
+
+            {mode === 'team' && teamSubMode === 'analysis' && (
+              <>
+                <TeamResults
+                  teamSize={teamSize}
+                  sortedThreats={sortedThreats}
+                  accentColor={c}
+                />
+                {showRecos && recommendations && (
+                  <RecommendationsPanel
+                    team={team}
+                    recommendations={recommendations}
+                    accentColor={c}
+                  />
+                )}
+              </>
+            )}
+
+            {mode === 'team' && teamSubMode === 'counter' && (
+              <CounterResults
+                teamSize={teamSize}
+                opponentTyping={opponentTyping}
+                opponentMoves={opponentMoves}
+                counterRanking={counterRanking}
+                accentColor={c}
+              />
             )}
 
             <div
@@ -550,7 +1056,807 @@
                 letterSpacing: '2px',
               }}
             >
-              ▾ DUAL-TYPE SUPPORTED IN DEFENSIVE MODE ▾
+              {mode === 'team'
+                ? teamSubMode === 'counter'
+                  ? '▾ INPUT OPPONENT TO FIND BEST COUNTER ▾'
+                  : '▾ ADD UP TO 6 POKéMON & GET RECOMMENDATIONS ▾'
+                : '▾ DUAL-TYPE SUPPORTED IN DEFENSIVE MODE ▾'}
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    const panelStyle = (c) => ({
+      background: 'rgba(0,0,0,0.55)',
+      border: `3px solid ${c.bg}`,
+      borderRadius: '4px',
+      padding: '24px',
+      position: 'relative',
+      boxShadow: `6px 6px 0 0 rgba(0,0,0,0.5)`,
+    });
+
+    const panelDescStyle = () => ({
+      fontFamily: '"VT323", monospace',
+      fontSize: '18px',
+      color: '#bbb',
+      marginTop: '12px',
+      marginBottom: '20px',
+      lineHeight: 1.3,
+    });
+
+    const PanelTag = ({ c, label }) => (
+      <div
+        style={{
+          position: 'absolute',
+          top: '-14px',
+          left: '20px',
+          background: c.bg,
+          color: c.text,
+          fontFamily: '"Press Start 2P", monospace',
+          fontSize: '11px',
+          padding: '6px 14px',
+          letterSpacing: '1px',
+          boxShadow: `0 0 0 2px ${c.text}`,
+        }}
+      >
+        {label}
+      </div>
+    );
+
+    function OpponentInput({ opponentTyping, opponentMoves, editingTarget, setEditingTarget, accentColor, clearOpponent, teamSize }) {
+      if (teamSize === 0) {
+        return (
+          <div
+            style={{
+              background: 'rgba(0,0,0,0.55)',
+              border: '3px dashed rgba(255,255,255,0.15)',
+              borderRadius: '4px',
+              padding: '40px 24px',
+              textAlign: 'center',
+              marginBottom: '24px',
+            }}
+          >
+            <div
+              style={{
+                fontFamily: '"VT323", monospace',
+                fontSize: '22px',
+                color: '#888',
+                letterSpacing: '2px',
+              }}
+            >
+              ▼ Add Pokémon to your team first ▼
+            </div>
+            <div style={{ fontFamily: '"VT323", monospace', fontSize: '17px', color: '#666', marginTop: '8px' }}>
+              switch to "Team Analysis" to build your team
+            </div>
+          </div>
+        );
+      }
+
+      const opponentColor = opponentTyping.type1 ? TYPE_COLORS[opponentTyping.type1] : accentColor;
+
+      return (
+        <div
+          style={{
+            background: 'rgba(0,0,0,0.55)',
+            border: `3px solid ${opponentColor.bg}`,
+            borderRadius: '4px',
+            padding: '20px',
+            marginBottom: '24px',
+            position: 'relative',
+            boxShadow: `6px 6px 0 0 rgba(0,0,0,0.5)`,
+          }}
+        >
+          <div
+            style={{
+              position: 'absolute',
+              top: '-14px',
+              left: '20px',
+              background: opponentColor.bg,
+              color: opponentColor.text,
+              fontFamily: '"Press Start 2P", monospace',
+              fontSize: '11px',
+              padding: '6px 14px',
+              letterSpacing: '1px',
+              boxShadow: `0 0 0 2px ${opponentColor.text}`,
+            }}
+          >
+            🎯 OPPONENT
+          </div>
+
+          <div style={{ marginTop: '14px' }}>
+            <div
+              style={{
+                fontFamily: '"Press Start 2P", monospace',
+                fontSize: '10px',
+                color: accentColor.glow,
+                marginBottom: '10px',
+                letterSpacing: '1px',
+              }}
+            >
+              ▸ OPPONENT TYPING
+            </div>
+            <div
+              onClick={() => setEditingTarget({ kind: 'opponentType' })}
+              style={{
+                padding: '12px 14px',
+                background: editingTarget?.kind === 'opponentType' ? `${accentColor.bg}30` : 'rgba(0,0,0,0.3)',
+                border: editingTarget?.kind === 'opponentType' ? `2px solid ${accentColor.glow}` : '2px solid rgba(255,255,255,0.1)',
+                borderRadius: '2px',
+                cursor: 'pointer',
+                marginBottom: '20px',
+                minHeight: '44px',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '10px',
+                flexWrap: 'wrap',
+              }}
+            >
+              {opponentTyping.type1 ? (
+                <>
+                  <TypeBadge type={opponentTyping.type1} size="sm" />
+                  {opponentTyping.type2 && (
+                    <>
+                      <span style={{ color: '#888', fontFamily: '"Press Start 2P", monospace', fontSize: '10px' }}>/</span>
+                      <TypeBadge type={opponentTyping.type2} size="sm" />
+                    </>
+                  )}
+                  {editingTarget?.kind === 'opponentType' && (
+                    <span style={{ marginLeft: 'auto', fontFamily: '"VT323", monospace', fontSize: '15px', color: '#999' }}>
+                      ◀ editing
+                    </span>
+                  )}
+                </>
+              ) : (
+                <span
+                  style={{
+                    fontFamily: '"VT323", monospace',
+                    fontSize: '18px',
+                    color: '#888',
+                    fontStyle: 'italic',
+                  }}
+                >
+                  Tap a type below to set opponent's primary/secondary type
+                </span>
+              )}
+            </div>
+
+            <div
+              style={{
+                fontFamily: '"Press Start 2P", monospace',
+                fontSize: '10px',
+                color: accentColor.glow,
+                marginBottom: '10px',
+                letterSpacing: '1px',
+              }}
+            >
+              ▸ OPPONENT'S MOVES
+              <span style={{ fontFamily: '"VT323", monospace', fontSize: '15px', color: '#999', marginLeft: '8px', letterSpacing: 0 }}>
+                up to 4 — tap a slot, then tap a type
+              </span>
+            </div>
+            <div
+              style={{
+                display: 'grid',
+                gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))',
+                gap: '8px',
+              }}
+            >
+              {opponentMoves.map((move, idx) => {
+                const isEditing = editingTarget?.kind === 'move' && editingTarget.moveIdx === idx;
+                const moveColor = move ? TYPE_COLORS[move] : null;
+                return (
+                  <div
+                    key={idx}
+                    onClick={() => setEditingTarget({ kind: 'move', moveIdx: idx })}
+                    style={{
+                      padding: '10px 12px',
+                      background: move
+                        ? `${moveColor.bg}25`
+                        : isEditing ? `${accentColor.bg}25` : 'rgba(0,0,0,0.3)',
+                      border: isEditing
+                        ? `2px solid ${accentColor.glow}`
+                        : move ? `2px solid ${moveColor.bg}` : '2px solid rgba(255,255,255,0.1)',
+                      borderRadius: '2px',
+                      cursor: 'pointer',
+                      minHeight: '52px',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: '4px',
+                    }}
+                  >
+                    <div
+                      style={{
+                        fontFamily: '"Press Start 2P", monospace',
+                        fontSize: '8px',
+                        color: isEditing ? accentColor.glow : '#888',
+                        letterSpacing: '1px',
+                      }}
+                    >
+                      MOVE {idx + 1}{isEditing ? ' ◀' : ''}
+                    </div>
+                    {move ? (
+                      <TypeBadge type={move} size="xs" />
+                    ) : (
+                      <span style={{ fontFamily: '"VT323", monospace', fontSize: '15px', color: '#666', fontStyle: 'italic' }}>
+                        empty
+                      </span>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+
+            <div style={{ textAlign: 'center', marginTop: '18px' }}>
+              <button
+                onClick={clearOpponent}
+                style={{
+                  background: 'transparent',
+                  color: '#aaa',
+                  border: '2px solid #555',
+                  borderRadius: '2px',
+                  padding: '8px 16px',
+                  fontFamily: '"Press Start 2P", monospace',
+                  fontSize: '9px',
+                  cursor: 'pointer',
+                  letterSpacing: '1px',
+                }}
+              >
+                ✕ CLEAR OPPONENT
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    function CounterResults({ teamSize, opponentTyping, opponentMoves, counterRanking, accentColor }) {
+      if (teamSize === 0) return null;
+      const validMoves = opponentMoves.filter(Boolean);
+      if (!opponentTyping.type1 || validMoves.length === 0) {
+        return (
+          <div
+            style={{
+              background: 'rgba(0,0,0,0.55)',
+              border: '3px dashed rgba(255,255,255,0.15)',
+              borderRadius: '4px',
+              padding: '40px 24px',
+              textAlign: 'center',
+            }}
+          >
+            <div
+              style={{
+                fontFamily: '"VT323", monospace',
+                fontSize: '22px',
+                color: '#888',
+                letterSpacing: '1px',
+              }}
+            >
+              ▼ Set opponent's typing and at least one move ▼
+            </div>
+          </div>
+        );
+      }
+
+      const best = counterRanking[0];
+
+      return (
+        <div style={panelStyle(accentColor)}>
+          <PanelTag c={accentColor} label="🎯 BEST COUNTERS" />
+          <div style={{ ...panelDescStyle(), marginBottom: '20px' }}>
+            Your team ranked vs <strong>
+              {opponentTyping.type1}{opponentTyping.type2 ? `/${opponentTyping.type2}` : ''}
+            </strong> using moves of those types
+          </div>
+
+          {/* Best counter highlighted */}
+          {best && (
+            <div
+              style={{
+                background: `linear-gradient(135deg, ${TYPE_COLORS[best.member.type1].bg}40 0%, ${TYPE_COLORS[best.member.type1].bg}10 100%)`,
+                border: `3px solid ${TYPE_COLORS[best.member.type1].bg}`,
+                borderRadius: '4px',
+                padding: '16px',
+                marginBottom: '20px',
+                position: 'relative',
+              }}
+            >
+              <div
+                style={{
+                  fontFamily: '"Press Start 2P", monospace',
+                  fontSize: '11px',
+                  color: TYPE_COLORS[best.member.type1].glow,
+                  letterSpacing: '2px',
+                  marginBottom: '10px',
+                }}
+              >
+                ★ BEST PICK — SLOT {best.slotIdx + 1}
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
+                <ComboBadges combo={best.member} size="md" />
+              </div>
+              <div style={{ marginTop: '12px', display: 'flex', gap: '20px', flexWrap: 'wrap', fontFamily: '"VT323", monospace', fontSize: '17px' }}>
+                <div>
+                  <span style={{ color: '#888' }}>Defense: </span>
+                  <span style={{ color: best.defenseScore > 0 ? '#5DFF8F' : best.defenseScore < 0 ? '#FF8F5D' : '#bbb' }}>
+                    {best.defenseScore > 0 ? '+' : ''}{best.defenseScore}
+                  </span>
+                </div>
+                <div>
+                  <span style={{ color: '#888' }}>Offense: </span>
+                  <span style={{ color: best.offenseScore > 0 ? '#5DFF8F' : best.offenseScore < 0 ? '#FF8F5D' : '#bbb' }}>
+                    {best.offenseScore > 0 ? '+' : ''}{best.offenseScore}
+                  </span>
+                </div>
+                <div style={{ marginLeft: 'auto' }}>
+                  <span style={{ color: '#888' }}>Total: </span>
+                  <span style={{ color: '#fff', fontWeight: 'bold' }}>
+                    {best.totalScore > 0 ? '+' : ''}{best.totalScore}
+                  </span>
+                </div>
+              </div>
+              <MatchupBreakdown matchup={best} />
+            </div>
+          )}
+
+          {/* All other team members ranked */}
+          {counterRanking.length > 1 && (
+            <>
+              <div
+                style={{
+                  fontFamily: '"Press Start 2P", monospace',
+                  fontSize: '10px',
+                  color: '#999',
+                  marginBottom: '10px',
+                  letterSpacing: '1px',
+                }}
+              >
+                ▸ FULL RANKING
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                {counterRanking.slice(1).map((m, i) => (
+                  <CounterRow key={m.slotIdx} matchup={m} rank={i + 2} />
+                ))}
+              </div>
+            </>
+          )}
+
+          <div
+            style={{
+              marginTop: '24px',
+              padding: '12px',
+              background: 'rgba(0,0,0,0.3)',
+              borderLeft: '3px solid #555',
+              borderRadius: '2px',
+              fontFamily: '"VT323", monospace',
+              fontSize: '16px',
+              color: '#999',
+              lineHeight: 1.4,
+            }}
+          >
+            <strong style={{ color: '#bbb' }}>How this works:</strong> Defense score rewards resisting/being immune to opponent's moves (immune +3, resist +1, weak −2, quad weak −4). Offense score rewards your STAB hitting hard (super effective +2, neutral 0, resisted −1, no effect −4) — uses your best type vs the opponent. Pure type theory only — no stats, abilities, or coverage moves.
+          </div>
+        </div>
+      );
+    }
+
+    function MatchupBreakdown({ matchup }) {
+      return (
+        <div style={{ marginTop: '14px', display: 'flex', flexDirection: 'column', gap: '6px' }}>
+          <div style={{ fontFamily: '"VT323", monospace', fontSize: '15px', color: '#888' }}>vs each move:</div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+            {matchup.moveBreakdown.map((mb, i) => (
+              <div
+                key={i}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  padding: '4px 8px',
+                  background: 'rgba(0,0,0,0.3)',
+                  borderRadius: '2px',
+                  fontFamily: '"VT323", monospace',
+                  fontSize: '15px',
+                }}
+              >
+                <TypeBadge type={mb.moveType} size="xs" />
+                <span style={{ color: multColor(mb.multiplier) }}>{multLabel(mb.multiplier)}</span>
+              </div>
+            ))}
+          </div>
+          <div style={{ fontFamily: '"VT323", monospace', fontSize: '15px', color: '#888', marginTop: '4px' }}>
+            your best STAB:{' '}
+            <span style={{ color: multColor(matchup.bestOffenseMult) }}>
+              {matchup.bestOffenseType} → {multLabel(matchup.bestOffenseMult)}
+            </span>
+          </div>
+        </div>
+      );
+    }
+
+    function CounterRow({ matchup, rank }) {
+      const c = TYPE_COLORS[matchup.member.type1];
+      return (
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '10px',
+            padding: '8px 12px',
+            background: `${c.bg}10`,
+            borderLeft: `3px solid ${c.bg}`,
+            borderRadius: '2px',
+            flexWrap: 'wrap',
+          }}
+        >
+          <div
+            style={{
+              fontFamily: '"Press Start 2P", monospace',
+              fontSize: '11px',
+              color: '#888',
+              minWidth: '24px',
+            }}
+          >
+            #{rank}
+          </div>
+          <div style={{ minWidth: '90px' }}>
+            <ComboBadges combo={matchup.member} size="xs" />
+          </div>
+          <div
+            style={{
+              display: 'flex',
+              gap: '10px',
+              fontFamily: '"VT323", monospace',
+              fontSize: '17px',
+              flexWrap: 'wrap',
+              marginLeft: 'auto',
+            }}
+          >
+            <span style={{ color: '#888' }}>
+              D: <span style={{ color: matchup.defenseScore > 0 ? '#5DFF8F' : matchup.defenseScore < 0 ? '#FF8F5D' : '#bbb' }}>
+                {matchup.defenseScore > 0 ? '+' : ''}{matchup.defenseScore}
+              </span>
+            </span>
+            <span style={{ color: '#888' }}>
+              O: <span style={{ color: matchup.offenseScore > 0 ? '#5DFF8F' : matchup.offenseScore < 0 ? '#FF8F5D' : '#bbb' }}>
+                {matchup.offenseScore > 0 ? '+' : ''}{matchup.offenseScore}
+              </span>
+            </span>
+            <span style={{ color: '#fff' }}>
+              = {matchup.totalScore > 0 ? '+' : ''}{matchup.totalScore}
+            </span>
+          </div>
+        </div>
+      );
+    }
+
+    function multColor(m) {
+      if (m === 0) return '#5DCFFF';
+      if (m === 0.25) return '#5DFF8F';
+      if (m === 0.5) return '#9DFF9D';
+      if (m === 1) return '#bbb';
+      if (m === 2) return '#FF8F5D';
+      if (m === 4) return '#FF3D3D';
+      return '#bbb';
+    }
+
+    function multLabel(m) {
+      if (m === 0) return '0×';
+      if (m === 0.25) return '¼×';
+      if (m === 0.5) return '½×';
+      if (m === 1) return '1×';
+      if (m === 2) return '2×';
+      if (m === 4) return '4×';
+      return `${m}×`;
+    }
+
+    function TeamResults({ teamSize, sortedThreats, accentColor }) {
+      if (teamSize === 0) {
+        return (
+          <div
+            style={{
+              background: 'rgba(0,0,0,0.55)',
+              border: `3px dashed rgba(255,255,255,0.15)`,
+              borderRadius: '4px',
+              padding: '40px 24px',
+              textAlign: 'center',
+            }}
+          >
+            <div
+              style={{
+                fontFamily: '"VT323", monospace',
+                fontSize: '24px',
+                color: '#888',
+                letterSpacing: '2px',
+              }}
+            >
+              ▼ Add Pokémon to your team to see analysis ▼
+            </div>
+          </div>
+        );
+      }
+
+      const criticalThreats = sortedThreats.filter(t => t.score > 0 && (t.weak + t.quadWeak) > t.total / 2);
+      const majorThreats = sortedThreats.filter(t => t.score > 0 && !criticalThreats.includes(t));
+      const safe = sortedThreats.filter(t => t.score <= 0).reverse();
+
+      return (
+        <div style={panelStyle(accentColor)}>
+          <PanelTag c={accentColor} label={`👥 TEAM ANALYSIS (${teamSize}/6)`} />
+          <div style={{ ...panelDescStyle(), marginBottom: '24px' }}>
+            Attacking types ranked by threat to your team. Numbers show: <span style={{ color: '#FF3D3D' }}>quad-weak</span> / <span style={{ color: '#FF8F5D' }}>weak</span> / <span style={{ color: '#9DFF9D' }}>resist</span> / <span style={{ color: '#5DCFFF' }}>immune</span>
+          </div>
+
+          {criticalThreats.length > 0 && (
+            <ThreatGroup title="CRITICAL THREATS" sublabel="(half your team weak or worse)" accent="#FF3D3D" threats={criticalThreats} />
+          )}
+          {majorThreats.length > 0 && (
+            <ThreatGroup title="THREATS" sublabel="(net dangerous to team)" accent="#FF8F5D" threats={majorThreats} />
+          )}
+          {safe.length > 0 && (
+            <ThreatGroup title="SAFE / RESISTED" sublabel="(team handles well)" accent="#5DFF8F" threats={safe} />
+          )}
+        </div>
+      );
+    }
+
+    function ThreatGroup({ title, sublabel, accent, threats }) {
+      return (
+        <div style={{ marginBottom: '24px' }}>
+          <div
+            style={{
+              fontFamily: '"Press Start 2P", monospace',
+              fontSize: '10px',
+              color: accent,
+              marginBottom: '12px',
+              letterSpacing: '1px',
+              textShadow: `2px 2px 0 rgba(0,0,0,0.3)`,
+            }}
+          >
+            ▸ {title}
+            {sublabel && (
+              <span style={{ fontFamily: '"VT323", monospace', fontSize: '15px', color: '#999', marginLeft: '8px', letterSpacing: 0 }}>
+                {sublabel}
+              </span>
+            )}
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+            {threats.map(t => <ThreatRow key={t.type} threat={t} />)}
+          </div>
+        </div>
+      );
+    }
+
+    function ThreatRow({ threat }) {
+      const c = TYPE_COLORS[threat.type];
+      return (
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '12px',
+            padding: '8px 12px',
+            background: `${c.bg}15`,
+            borderLeft: `4px solid ${c.bg}`,
+            borderRadius: '2px',
+          }}
+        >
+          <div style={{ minWidth: '90px' }}>
+            <TypeBadge type={threat.type} size="xs" />
+          </div>
+          <div
+            style={{
+              display: 'flex',
+              gap: '10px',
+              fontFamily: '"VT323", monospace',
+              fontSize: '18px',
+              flexWrap: 'wrap',
+            }}
+          >
+            {threat.quadWeak > 0 && <span style={{ color: '#FF3D3D' }}>4×: {threat.quadWeak}</span>}
+            {threat.weak > 0 && <span style={{ color: '#FF8F5D' }}>2×: {threat.weak}</span>}
+            {threat.neutral > 0 && <span style={{ color: '#999' }}>1×: {threat.neutral}</span>}
+            {threat.resist > 0 && <span style={{ color: '#9DFF9D' }}>½×: {threat.resist}</span>}
+            {threat.doubleResist > 0 && <span style={{ color: '#5DFF8F' }}>¼×: {threat.doubleResist}</span>}
+            {threat.immune > 0 && <span style={{ color: '#5DCFFF' }}>0×: {threat.immune}</span>}
+          </div>
+        </div>
+      );
+    }
+
+    function RecommendationsPanel({ team, recommendations, accentColor }) {
+      const { additions, swaps } = recommendations;
+      const teamSize = team.filter(Boolean).length;
+      const hasEmptySlot = team.some(s => s === null);
+
+      return (
+        <div style={{ ...panelStyle(accentColor), marginTop: '24px' }}>
+          <PanelTag c={accentColor} label="★ RECOMMENDATIONS" />
+          <div style={{ ...panelDescStyle(), marginBottom: '20px' }}>
+            Current team threat score: <strong style={{ color: '#FF8F5D' }}>{additions.baseline}</strong>
+            <span style={{ color: '#888', fontSize: '15px' }}> (lower is better)</span>
+          </div>
+
+          <div style={{ marginBottom: '28px' }}>
+            <div
+              style={{
+                fontFamily: '"Press Start 2P", monospace',
+                fontSize: '11px',
+                color: '#5DFF8F',
+                marginBottom: '12px',
+                letterSpacing: '1px',
+              }}
+            >
+              ▸ {hasEmptySlot ? 'BEST TYPES TO ADD' : 'BEST TYPES TO BRING (TEAM IS FULL)'}
+              <span style={{ fontFamily: '"VT323", monospace', fontSize: '15px', color: '#999', marginLeft: '8px', letterSpacing: 0 }}>
+                top 5 by team improvement
+              </span>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+              {additions.results.map((r, i) => (
+                <RecoRow
+                  key={i}
+                  rank={i + 1}
+                  combo={r.combo}
+                  improvement={r.improvement}
+                  newScore={r.newScore}
+                />
+              ))}
+            </div>
+          </div>
+
+          {swaps && swaps.swaps.length > 0 && (
+            <div>
+              <div
+                style={{
+                  fontFamily: '"Press Start 2P", monospace',
+                  fontSize: '11px',
+                  color: '#FFB85D',
+                  marginBottom: '12px',
+                  letterSpacing: '1px',
+                }}
+              >
+                ▸ BEST SWAPS
+                <span style={{ fontFamily: '"VT323", monospace', fontSize: '15px', color: '#999', marginLeft: '8px', letterSpacing: 0 }}>
+                  drop X, replace with Y
+                </span>
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                {swaps.swaps.filter(s => s.improvement > 0).slice(0, 5).map((s) => (
+                  <SwapRow key={s.slotIdx} swap={s} />
+                ))}
+                {swaps.swaps.filter(s => s.improvement > 0).length === 0 && (
+                  <div
+                    style={{
+                      fontFamily: '"VT323", monospace',
+                      fontSize: '18px',
+                      color: '#5DFF8F',
+                      fontStyle: 'italic',
+                      paddingLeft: '8px',
+                    }}
+                  >
+                    Your team is well-balanced — no swap improves the score!
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          <div
+            style={{
+              marginTop: '24px',
+              padding: '12px',
+              background: 'rgba(0,0,0,0.3)',
+              borderLeft: '3px solid #555',
+              borderRadius: '2px',
+              fontFamily: '"VT323", monospace',
+              fontSize: '16px',
+              color: '#999',
+              lineHeight: 1.4,
+            }}
+          >
+            <strong style={{ color: '#bbb' }}>How this works:</strong> threat score sums up team weaknesses (4× = 4pts, 2× = 2pts) minus resistances (½× = -1, ¼× = -2, immune = -3). Recommendations test all 153 possible type combos and rank by score reduction. Pure type theory only — doesn't consider stats, abilities, or movesets.
+          </div>
+        </div>
+      );
+    }
+
+    function RecoRow({ rank, combo, improvement, newScore }) {
+      const c = TYPE_COLORS[combo.type1];
+      return (
+        <div
+          className="reco-card"
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '14px',
+            padding: '12px 14px',
+            background: `${c.bg}15`,
+            borderLeft: `4px solid ${c.bg}`,
+            borderRadius: '2px',
+          }}
+        >
+          <div
+            style={{
+              fontFamily: '"Press Start 2P", monospace',
+              fontSize: '14px',
+              color: c.glow,
+              minWidth: '24px',
+              textAlign: 'center',
+            }}
+          >
+            {rank}
+          </div>
+          <div style={{ flex: 1 }}>
+            <ComboBadges combo={combo} size="sm" />
+          </div>
+          <div
+            style={{
+              fontFamily: '"VT323", monospace',
+              fontSize: '18px',
+              textAlign: 'right',
+            }}
+          >
+            {improvement > 0 ? (
+              <span style={{ color: '#5DFF8F' }}>−{improvement} threat</span>
+            ) : improvement === 0 ? (
+              <span style={{ color: '#999' }}>no change</span>
+            ) : (
+              <span style={{ color: '#FF8F5D' }}>+{Math.abs(improvement)} threat</span>
+            )}
+            <div style={{ fontSize: '13px', color: '#888' }}>→ {newScore}</div>
+          </div>
+        </div>
+      );
+    }
+
+    function SwapRow({ swap }) {
+      return (
+        <div
+          className="reco-card"
+          style={{
+            padding: '12px 14px',
+            background: 'rgba(0,0,0,0.3)',
+            border: '2px solid rgba(255,255,255,0.1)',
+            borderRadius: '2px',
+          }}
+        >
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '12px',
+              flexWrap: 'wrap',
+              marginBottom: '6px',
+            }}
+          >
+            <div
+              style={{
+                fontFamily: '"Press Start 2P", monospace',
+                fontSize: '9px',
+                color: '#888',
+                letterSpacing: '1px',
+              }}
+            >
+              SLOT {swap.slotIdx + 1}:
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+              <span style={{ opacity: 0.6 }}>
+                <ComboBadges combo={swap.original} size="xs" />
+              </span>
+              <span style={{ color: '#888', fontFamily: '"Press Start 2P", monospace', fontSize: '12px' }}>→</span>
+              <ComboBadges combo={swap.bestReplacement} size="xs" />
+            </div>
+            <div
+              style={{
+                marginLeft: 'auto',
+                fontFamily: '"VT323", monospace',
+                fontSize: '17px',
+                color: '#5DFF8F',
+              }}
+            >
+              −{swap.improvement} threat
             </div>
           </div>
         </div>
