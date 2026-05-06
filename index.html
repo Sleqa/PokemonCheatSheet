@@ -442,7 +442,7 @@
         if (mode === 'offensive') { setType1(t); setType2(null); return; }
         if (t === type1) { if (type2) { setType1(type2); setType2(null); } return; }
         if (t === type2) { setType2(null); return; }
-        if (!type2) setType2(t); else setType1(t);
+        if (!type2) setType2(t); else { setType1(type2); setType2(t); }
       };
 
       const handleTypeClickAnalysis = (t) => {
