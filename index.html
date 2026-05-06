@@ -442,7 +442,7 @@
         if (mode === 'offensive') { setType1(t); setType2(null); return; }
         if (t === type1) { if (type2) { setType1(type2); setType2(null); } return; }
         if (t === type2) { setType2(null); return; }
-        if (!type2) setType2(t); else setType2(t);
+        if (!type2) setType2(t); else setType1(t);
       };
 
       const handleTypeClickAnalysis = (t) => {
@@ -626,7 +626,7 @@
             {/* DEFENSIVE / OFFENSIVE description */}
             {mode !== 'team' && (
               <div style={{ textAlign: 'center', fontFamily: '"VT323", monospace', fontSize: '20px', color: '#bbb', marginBottom: '16px', padding: '0 10px' }}>
-                {mode === 'defensive' ? (type2 ? 'Tap a third type to swap your secondary, or tap selected to deselect' : 'Tap one or two types to build a dual-type defender') : 'Tap a type — see what its moves do offensively'}
+                {mode === 'defensive' ? (type2 ? 'Tap a third type to swap your primary, or tap selected to deselect' : 'Tap one or two types to build a dual-type defender') : 'Tap a type — see what its moves do offensively'}
               </div>
             )}
 
