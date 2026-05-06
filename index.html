@@ -459,7 +459,7 @@
         } else if (!slot.type2) {
           newTeam[editingSlot] = { ...slot, type2: t };
         } else {
-          newTeam[editingSlot] = { ...slot, type2: t };
+          newTeam[editingSlot] = { ...slot, type1: slot.type2, type2: t };
         }
         setYourTeam(newTeam);
       };
@@ -483,7 +483,7 @@
           } else if (!slot.type2) {
             newTeam[editingSlot] = { ...slot, type2: t };
           } else {
-            newTeam[editingSlot] = { ...slot, type2: t };
+            newTeam[editingSlot] = { ...slot, type1: slot.type2, type2: t };
           }
         } else if (editTarget.startsWith('move')) {
           // Edit move slot
